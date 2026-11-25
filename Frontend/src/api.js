@@ -1,46 +1,33 @@
-const BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000"
+const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
-async function req(method, path, body) {
-  const r = await fetch(`${BASE}${path}`, {
-    method,
-    headers: body != null ? { "Content-Type": "application/json" } : {},
-    body: body != null ? JSON.stringify(body) : undefined,
-  })
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}))
-    const msg = Array.isArray(err.detail)
-      ? err.detail.map((e) => e.msg).join("; ")
-      : (err.detail ?? `HTTP ${r.status}`)
-    throw new Error(msg)
+function readableError(status, data) {
+  if (status === 503) return "All AI providers are currently unavailable. Please try again shortly.";
+  if (status === 422) {
+    const d = data && data.detail;
+    if (Array.isArray(d) && d.length) return "Invalid input: " + d.map((e) => e.msg).join("; ");
+    return "Invalid input. Messages must be 1-4000 characters.";
   }
-  return r.status === 204 ? null : r.json()
+  if (data && typeof data.detail === "string") return data.detail;
+  return `Request failed (HTTP ${status}).`;
 }
 
-// Notes
-export const getNotes = () => req("GET", "/notes")
-export const createNote = (title, content) => req("POST", "/notes", { title, content })
-export const updateNote = (id, title, content) => req("PUT", `/notes/${id}`, { title, content })
-export const deleteNote = (id) => req("DELETE", `/notes/${id}`)
-export const noteAI = (id, action) => req("POST", `/notes/${id}/ai`, { action })
-
-// Tasks
-export const getTasks = () => req("GET", "/tasks")
-export const createTask = (data) => req("POST", "/tasks", data)
-export const updateTask = (id, data) => req("PUT", `/tasks/${id}`, data)
-export const deleteTask = (id) => req("DELETE", `/tasks/${id}`)
-export const aiSuggestTasks = (description) => req("POST", "/tasks/ai-suggest", { description })
-
-// Resume
-export const getResume = () => req("GET", "/resume")
-export const createResumeSection = (data) => req("POST", "/resume/sections", data)
-export const updateResumeSection = (id, data) => req("PUT", `/resume/sections/${id}`, data)
-export const deleteResumeSection = (id) => req("DELETE", `/resume/sections/${id}`)
-export const resumeAI = (sectionId, action, jobDescription) =>
-  req("POST", `/resume/sections/${sectionId}/ai`, { action, job_description: jobDescription ?? null })
-
-// Study / Flashcards
-export const getFlashcards = (deck) =>
-  req("GET", `/study/flashcards${deck ? `?deck=${encodeURIComponent(deck)}` : ""}`)
-export const generateFlashcards = (text, deckName) =>
-  req("POST", "/study/generate", { text, deck_name: deckName ?? "default" })
-export const deleteFlashcard = (id) => req("DELETE", `/study/flashcards/${id}`)
+export async function sendChat({ sessionId, message, systemPrompt, simulate }) {
+  const headers = { "Content-Type": "application/json" };
+  if (simulate) headers["X-Simulate-Failure"] = simulate;
+  const body = { session_id: sessionId, message };
+  if (systemPrompt && systemPrompt.trim()) body.system_prompt = systemPrompt;
+  let res;
+  try {
+    res = await fetch(`${API_URL}/chat`, { method: "POST", headers, body: JSON.stringify(body) });
+  } catch {
+    throw new Error("Cannot reach the server. Check your connection and try again.");
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* non-JSON body */
+  }
+  if (!res.ok) throw new Error(readableError(res.status, data));
+  return data;
+}

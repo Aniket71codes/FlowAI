@@ -1,43 +1,17 @@
 import { useEffect, useState } from "react"
-import Layout from "./components/Layout"
-import Dashboard from "./pages/Dashboard"
-import Notes from "./pages/Notes"
-import Resume from "./pages/Resume"
-import Study from "./pages/Study"
-import Tasks from "./pages/Tasks"
+import Home from "./Home"
+import Chat from "./Chat"
 
-export type Route = "dashboard" | "notes" | "tasks" | "resume" | "study"
-
-function getRoute(): Route {
-  const h = window.location.hash.replace(/^#\/?/, "")
-  if (["notes", "tasks", "resume", "study"].includes(h)) return h as Route
-  return "dashboard"
-}
-
-export function navigate(r: Route) {
-  window.location.hash = `#/${r}`
-}
+const isChat = () => window.location.hash === "#/chat"
 
 export default function Root() {
-  const [route, setRoute] = useState<Route>(getRoute)
+  const [chat, setChat] = useState(isChat())
 
   useEffect(() => {
-    const onHash = () => setRoute(getRoute())
+    const onHash = () => setChat(isChat())
     window.addEventListener("hashchange", onHash)
     return () => window.removeEventListener("hashchange", onHash)
   }, [])
 
-  const pages: Record<Route, React.ReactNode> = {
-    dashboard: <Dashboard navigate={navigate} />,
-    notes: <Notes />,
-    tasks: <Tasks />,
-    resume: <Resume />,
-    study: <Study />,
-  }
-
-  return (
-    <Layout route={route} navigate={navigate}>
-      {pages[route]}
-    </Layout>
-  )
+  return chat ? <Chat /> : <Home onStart={() => (window.location.hash = "#/chat")} />
 }

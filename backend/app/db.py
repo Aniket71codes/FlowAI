@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sqlite3
@@ -6,41 +7,19 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS notes (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  title      TEXT NOT NULL,
-  content    TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS messages (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  title       TEXT NOT NULL,
-  description TEXT,
-  priority    TEXT NOT NULL DEFAULT 'medium',
-  status      TEXT NOT NULL DEFAULT 'todo',
-  due_date    TEXT,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
+  session_id  TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  metadata    TEXT,
+  created_at  TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS resume_sections (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  section_type TEXT NOT NULL,
-  title        TEXT,
-  content      TEXT NOT NULL,
-  order_idx    INTEGER NOT NULL DEFAULT 0,
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS flashcards (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  question   TEXT NOT NULL,
-  answer     TEXT NOT NULL,
-  deck_name  TEXT NOT NULL DEFAULT 'default',
-  created_at TEXT NOT NULL
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id    TEXT PRIMARY KEY,
+  system_prompt TEXT,
+  created_at    TEXT NOT NULL
 );
 """
 
@@ -68,8 +47,11 @@ class Database:
 
     @staticmethod
     def _fallback(path: str) -> str:
-        fb = os.path.join(tempfile.gettempdir(), "flowai.db")
-        logging.getLogger("db").warning("Cannot write db at %s; falling back to %s", path, fb)
+        fb = os.path.join(tempfile.gettempdir(), "app.db")
+        logging.getLogger("db").warning(
+            "Cannot write database at %s; falling back to %s (history will NOT persist). "
+            "Check DATABASE_URL and the disk mount permissions.", path, fb
+        )
         return fb
 
     @contextmanager
@@ -94,130 +76,45 @@ class Database:
         except Exception:
             return False
 
-    # ── Notes ─────────────────────────────────────────────────────────────────
-
-    def list_notes(self):
+    def session_exists(self, session_id: str) -> bool:
         with self.conn() as c:
-            rows = c.execute("SELECT * FROM notes ORDER BY updated_at DESC").fetchall()
-        return [dict(r) for r in rows]
+            r = c.execute("SELECT 1 FROM messages WHERE session_id=? LIMIT 1", (session_id,)).fetchone()
+        return r is not None
 
-    def get_note(self, note_id: int):
+    def get_system_prompt(self, session_id: str):
         with self.conn() as c:
-            r = c.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
-        return dict(r) if r else None
+            r = c.execute("SELECT system_prompt FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+        return r["system_prompt"] if r else None
 
-    def create_note(self, title: str, content: str):
-        now = _now()
-        with self.conn() as c:
-            cur = c.execute(
-                "INSERT INTO notes(title, content, created_at, updated_at) VALUES(?,?,?,?)",
-                (title, content, now, now),
-            )
-            return dict(c.execute("SELECT * FROM notes WHERE id=?", (cur.lastrowid,)).fetchone())
-
-    def update_note(self, note_id: int, title: str, content: str):
-        with self.conn() as c:
-            c.execute(
-                "UPDATE notes SET title=?, content=?, updated_at=? WHERE id=?",
-                (title, content, _now(), note_id),
-            )
-            r = c.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
-        return dict(r) if r else None
-
-    def delete_note(self, note_id: int) -> bool:
-        with self.conn() as c:
-            cur = c.execute("DELETE FROM notes WHERE id=?", (note_id,))
-        return cur.rowcount > 0
-
-    # ── Tasks ─────────────────────────────────────────────────────────────────
-
-    def list_tasks(self):
+    def get_history(self, session_id: str):
         with self.conn() as c:
             rows = c.execute(
-                "SELECT * FROM tasks ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC"
+                "SELECT role, content, metadata FROM messages WHERE session_id=? ORDER BY id ASC",
+                (session_id,),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [
+            {
+                "role": r["role"],
+                "content": r["content"],
+                "metadata": json.loads(r["metadata"]) if r["metadata"] else None,
+            }
+            for r in rows
+        ]
 
-    def create_task(self, title: str, description, priority: str, due_date):
+    def save_exchange(self, session_id, system_prompt, user_msg, reply, metadata) -> None:
+        """Persist user + assistant messages atomically (only called on success)."""
         now = _now()
-        with self.conn() as c:
-            cur = c.execute(
-                "INSERT INTO tasks(title, description, priority, status, due_date, created_at, updated_at) VALUES(?,?,'todo',?,?,?,?)",
-                (title, description, priority, due_date, now, now),
-            )
-            return dict(c.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone())
-
-    def update_task(self, task_id: int, title, description, priority, status, due_date):
         with self.conn() as c:
             c.execute(
-                "UPDATE tasks SET title=?, description=?, priority=?, status=?, due_date=?, updated_at=? WHERE id=?",
-                (title, description, priority, status, due_date, _now(), task_id),
+                "INSERT INTO sessions(session_id, system_prompt, created_at) VALUES(?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET system_prompt=excluded.system_prompt",
+                (session_id, system_prompt, now),
             )
-            r = c.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        return dict(r) if r else None
-
-    def delete_task(self, task_id: int) -> bool:
-        with self.conn() as c:
-            cur = c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-        return cur.rowcount > 0
-
-    # ── Resume ────────────────────────────────────────────────────────────────
-
-    def list_resume_sections(self):
-        with self.conn() as c:
-            rows = c.execute("SELECT * FROM resume_sections ORDER BY order_idx ASC, id ASC").fetchall()
-        return [dict(r) for r in rows]
-
-    def get_resume_section(self, section_id: int):
-        with self.conn() as c:
-            r = c.execute("SELECT * FROM resume_sections WHERE id=?", (section_id,)).fetchone()
-        return dict(r) if r else None
-
-    def create_resume_section(self, section_type: str, title, content: str, order_idx: int):
-        now = _now()
-        with self.conn() as c:
-            cur = c.execute(
-                "INSERT INTO resume_sections(section_type, title, content, order_idx, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-                (section_type, title, content, order_idx, now, now),
-            )
-            return dict(c.execute("SELECT * FROM resume_sections WHERE id=?", (cur.lastrowid,)).fetchone())
-
-    def update_resume_section(self, section_id: int, title, content: str):
-        with self.conn() as c:
             c.execute(
-                "UPDATE resume_sections SET title=?, content=?, updated_at=? WHERE id=?",
-                (title, content, _now(), section_id),
+                "INSERT INTO messages(session_id, role, content, metadata, created_at) VALUES(?,?,?,?,?)",
+                (session_id, "user", user_msg, None, now),
             )
-            r = c.execute("SELECT * FROM resume_sections WHERE id=?", (section_id,)).fetchone()
-        return dict(r) if r else None
-
-    def delete_resume_section(self, section_id: int) -> bool:
-        with self.conn() as c:
-            cur = c.execute("DELETE FROM resume_sections WHERE id=?", (section_id,))
-        return cur.rowcount > 0
-
-    # ── Flashcards ────────────────────────────────────────────────────────────
-
-    def list_flashcards(self, deck: str = None):
-        with self.conn() as c:
-            if deck:
-                rows = c.execute(
-                    "SELECT * FROM flashcards WHERE deck_name=? ORDER BY id DESC", (deck,)
-                ).fetchall()
-            else:
-                rows = c.execute("SELECT * FROM flashcards ORDER BY id DESC").fetchall()
-        return [dict(r) for r in rows]
-
-    def create_flashcard(self, question: str, answer: str, deck_name: str):
-        now = _now()
-        with self.conn() as c:
-            cur = c.execute(
-                "INSERT INTO flashcards(question, answer, deck_name, created_at) VALUES(?,?,?,?)",
-                (question, answer, deck_name, now),
+            c.execute(
+                "INSERT INTO messages(session_id, role, content, metadata, created_at) VALUES(?,?,?,?,?)",
+                (session_id, "assistant", reply, json.dumps(metadata), _now()),
             )
-            return dict(c.execute("SELECT * FROM flashcards WHERE id=?", (cur.lastrowid,)).fetchone())
-
-    def delete_flashcard(self, card_id: int) -> bool:
-        with self.conn() as c:
-            cur = c.execute("DELETE FROM flashcards WHERE id=?", (card_id,))
-        return cur.rowcount > 0
