@@ -9,3 +9,18 @@
 
 html, body, #root { height: 100%; margin: 0; background: #000; }
 body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; letter-spacing: -0.011em; }
+
+/* Flashcard flip animation */
+.flashcard { perspective: 1000px; }
+.flashcard-inner {
+  position: relative;
+  transition: transform 0.45s ease;
+  transform-style: preserve-3d;
+}
+.flashcard-inner.flipped { transform: rotateY(180deg); }
+.flashcard-front,
+.flashcard-back {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.flashcard-back { transform: rotateY(180deg); }

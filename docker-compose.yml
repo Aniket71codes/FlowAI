@@ -3,7 +3,7 @@ services:
     build: ./backend
     env_file: .env
     environment:
-      DATABASE_URL: sqlite:////data/app.db
+      DATABASE_URL: sqlite:////data/flowai.db
     ports:
       - "8000:8000"
     volumes:
